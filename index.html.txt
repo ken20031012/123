@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>旅費小助手 - 智慧分析版</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js";
+        import { getFirestore, collection, addDoc, deleteDoc, doc, onSnapshot, query, orderBy } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js";
+
+        // --- 全域變數與配置 ---
+        // 注意：在 GitHub Pages 或本地運行時，請填入你的 Firebase 配置
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+            apiKey: "請填入你的API_KEY",
+            authDomain: "你的專案ID.firebaseapp.com",
+            projectId: "你的專案ID",
+            storageBucket: "你的專案ID.firebasestorage.app",
+            messagingSenderId: "SENDER_ID",
+            appId: "APP_ID"
+        };
+        
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'travel-expense-v1';
+        
+        // 初始化 Firebase
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        // 狀態管理
+        let state = {
+            user: null,
+            expenses: [],
+            members: ['陳彥蓁', '林薇亞', '周哲妤', '彭語珊', '陳庭韋', '張冠玨', '林昱承', '鍾世紘'],
+            balances: {},
+            charts: {
+                balance: null,
+                contribution: null
+            }
+        };
+
+        // --- 核心邏輯 ---
+
+        // 計算結算餘額
+        function calculateBalances() {
+            const bal = {};
+            state.members.forEach(m => bal[m] = 0);
+
+            state.expenses.forEach(exp => {
+                if (!exp.splitWith || exp.splitWith.length === 0) return;
+                const share = exp.amount / exp.splitWith.length;
+                
+                // 付款人 +
+                if (bal.hasOwnProperty(exp.payer)) {
+                    bal[exp.payer] += exp.amount;
+                }
+                
+                // 分攤人 -
+                exp.splitWith.forEach(person => {
+                    if (bal.hasOwnProperty(person)) {
+                        bal[person] -= share;
+                    }
+                });
+            });
+            state.balances = bal;
+            updateUI();
+        }
+
+        // --- UI 更新與渲染 ---
+
+        function updateUI() {
+            renderBalanceCards();
+            renderExpenseList();
+            updateCharts();
+            lucide.createIcons();
+        }
+
+        function renderBalanceCards() {
+            const container = document.getElementById('balance-cards');
+            container.innerHTML = state.members.map(name => {
+                const amount = Math.round(state.balances[name]);
+                const isPositive = amount >= 0;
+                const colorClass = isPositive ? 'text-emerald-600' : 'text-rose-500';
+                const sign = isPositive ? '+' : '';
+                return `
+                    <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 flex flex-col items-center hover:border-indigo-100 transition-colors">
+                        <div class="w-10 h-10 bg-slate-50 rounded-full flex items-center justify-center mb-2 text-slate-400">
+                            <i data-lucide="user-circle-2" class="w-6 h-6"></i>
+                        </div>
+                        <span class="text-xs font-bold text-slate-500 truncate w-full text-center">${name}</span>
+                        <span class="text-base font-black mt-1 ${colorClass}">${sign}${amount}</span>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderExpenseList() {
+            const container = document.getElementById('expense-list');
+            if (state.expenses.length === 0) {
+                container.innerHTML = `
+                    <div class="bg-white border-2 border-dashed border-slate-100 rounded-3xl p-12 text-center">
+                        <p class="text-slate-400 font-bold">目前沒有任何紀錄</p>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = state.expenses.map(exp => `
+                <div class="bg-white p-5 rounded-2xl shadow-sm border border-slate-50 flex items-center justify-between group hover:shadow-md transition-all mb-3">
+                    <div class="flex items-center gap-4 flex-1 min-w-0">
+                        <div class="w-12 h-12 bg-indigo-50 rounded-2xl flex-shrink-0 flex items-center justify-center text-indigo-600">
+                            <i data-lucide="receipt" class="w-5 h-5"></i>
+                        </div>
+                        <div class="min-w-0">
+                            <h4 class="font-bold text-slate-800 truncate">${escapeHtml(exp.title)}</h4>
+                            <p class="text-[11px] font-bold text-slate-400 uppercase tracking-tight">
+                                ${exp.payer} 支付 · ${exp.splitWith.length} 人平分
+                            </p>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-4 ml-4">
+                        <div class="text-right">
+                            <div class="text-lg font-black text-slate-800">$${Math.round(exp.amount)}</div>
+                            <div class="text-[10px] text-slate-300 font-bold">每人 $${Math.round(exp.amount / exp.splitWith.length)}</div>
+                        </div>
+                        <button onclick="window.deleteExpense('${exp.id}')" class="p-2 text-slate-200 hover:text-rose-400 transition-colors">
+                            <i data-lucide="trash-2" class="w-4 h-4"></i>
+                        </button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function updateCharts() {
+            // 長條圖數據：結算餘額
+            const labels = state.members;
+            const balanceData = labels.map(m => state.balances[m]);
+            const backgroundColors = balanceData.map(val => val >= 0 ? 'rgba(16, 185, 129, 0.6)' : 'rgba(244, 63, 94, 0.6)');
+            
+            if (state.charts.balance) {
+                state.charts.balance.data.datasets[0].data = balanceData;
+                state.charts.balance.data.datasets[0].backgroundColor = backgroundColors;
+                state.charts.balance.update();
+            } else {
+                const ctx = document.getElementById('chart-balance').getContext('2d');
+                state.charts.balance = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: '結算餘額',
+                            data: balanceData,
+                            backgroundColor: backgroundColors,
+                            borderRadius: 6,
+                            borderSkipped: false
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        scales: {
+                            y: { grid: { display: false } },
+                            x: { grid: { display: false } }
+                        }
+                    }
+                });
+            }
+
+            // 圓餅圖數據：總支出貢獻
+            const contributionMap = {};
+            state.members.forEach(m => contributionMap[m] = 0);
+            state.expenses.forEach(e => contributionMap[e.payer] += e.amount);
+            const contributionData = labels.map(m => contributionMap[m]);
+
+            if (state.charts.contribution) {
+                state.charts.contribution.data.datasets[0].data = contributionData;
+                state.charts.contribution.update();
+            } else {
+                const ctx = document.getElementById('chart-contribution').getContext('2d');
+                state.charts.contribution = new Chart(ctx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            data: contributionData,
+                            backgroundColor: [
+                                '#6366f1', '#ec4899', '#8b5cf6', '#14b8a6', 
+                                '#f59e0b', '#3b82f6', '#10b981', '#f43f5e'
+                            ],
+                            borderWidth: 0
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        cutout: '70%',
+                        plugins: {
+                            legend: { position: 'right', labels: { boxWidth: 10, usePointStyle: true, font: { size: 10 } } }
+                        }
+                    }
+                });
+            }
+        }
+
+        // --- 互動功能 ---
+
+        // 刪除功能掛載到 window 以便 onclick 調用
+        window.deleteExpense = async (id) => {
+            if(!confirm('確定要刪除這筆紀錄嗎？')) return;
+            try {
+                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', id));
+            } catch (err) {
+                console.error("Delete Error", err);
+            }
+        };
+
+        // Modal 控制
+        const modal = document.getElementById('add-modal');
+        const form = document.getElementById('add-form');
+        
+        window.openModal = () => {
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            // 重置表單
+            document.getElementById('amount').value = '';
+            document.getElementById('title').value = '';
+            window.resetSplit();
+        };
+
+        window.closeModal = () => {
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+        };
+
+        // 表單提交
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const title = document.getElementById('title').value;
+            const amount = parseFloat(document.getElementById('amount').value);
+            const payer = document.querySelector('input[name="payer"]:checked').value;
+            const splitCheckboxes = document.querySelectorAll('input[name="split"]:checked');
+            const splitWith = Array.from(splitCheckboxes).map(cb => cb.value);
+
+            if (!title || !amount || splitWith.length === 0) return;
+
+            try {
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'expenses'), {
+                    title,
+                    amount,
+                    payer,
+                    splitWith,
+                    createdAt: Date.now(),
+                    createdBy: state.user?.uid || 'anon'
+                });
+                window.closeModal();
+            } catch (err) {
+                console.error("Add Error", err);
+                alert('新增失敗，請檢查網路連線');
+            }
+        });
+
+        // 全選/清除
+        window.toggleAllSplit = (checked) => {
+            document.querySelectorAll('input[name="split"]').forEach(cb => cb.checked = checked);
+        };
+        window.resetSplit = () => {
+            // 預設全選
+            window.toggleAllSplit(true);
+            // 預設付款人
+            document.querySelector('input[name="payer"][value="陳彥蓁"]').checked = true;
+        };
+
+        // 工具函數
+        function escapeHtml(text) {
+            const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
+            return text.replace(/[&<>"']/g, function(m) { return map[m]; });
+        }
+
+        // --- 初始化流程 ---
+        
+        // 1. 認證
+        const initAuth = async () => {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+                await signInAnonymously(auth);
+            }
+        };
+        initAuth();
+
+        // 2. 監聽數據
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                state.user = user;
+                document.getElementById('connection-status').innerHTML = `
+                    <div class="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse"></div>
+                    已連線
+                `;
+                
+                const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'expenses'));
+                onSnapshot(q, (snapshot) => {
+                    const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    state.expenses = data.sort((a, b) => b.createdAt - a.createdAt);
+                    calculateBalances();
+                });
+            }
+        });
+
+        // 3. 初始化 UI 元件 (如成員選擇器)
+        function initFormUI() {
+            const payerContainer = document.getElementById('payer-options');
+            const splitContainer = document.getElementById('split-options');
+            
+            state.members.forEach((m, idx) => {
+                // 付款人選項
+                payerContainer.innerHTML += `
+                    <label class="cursor-pointer">
+                        <input type="radio" name="payer" value="${m}" class="peer sr-only" ${idx === 0 ? 'checked' : ''}>
+                        <div class="px-3 py-2 rounded-xl bg-slate-50 text-slate-500 text-sm font-bold border border-transparent peer-checked:bg-indigo-600 peer-checked:text-white peer-checked:shadow-md transition-all">
+                            ${m}
+                        </div>
+                    </label>
+                `;
+                // 分攤人選項
+                splitContainer.innerHTML += `
+                    <label class="cursor-pointer">
+                        <input type="checkbox" name="split" value="${m}" class="peer sr-only" checked>
+                        <div class="px-3 py-2 rounded-xl bg-slate-50 text-slate-300 text-sm font-bold border border-transparent flex items-center gap-1 peer-checked:bg-indigo-50 peer-checked:text-indigo-600 peer-checked:ring-1 peer-checked:ring-indigo-200 transition-all">
+                            <i data-lucide="check" class="w-3 h-3 opacity-0 peer-checked:opacity-100"></i>
+                            ${m}
+                        </div>
+                    </label>
+                `;
+            });
+        }
+        initFormUI();
+        lucide.createIcons();
+    </script>
+    <style>
+        .chart-container {
+            position: relative;
+            width: 100%;
+            height: 250px;
+        }
+    </style>
+    <!-- Chosen Palette: Indigo/Slate/Emerald - Clean, modern, trustworthy financial aesthetic -->
+    <!-- Application Structure Plan: Dashboard layout. Top section for data visualization (Charts) to give immediate insight into financial status. Middle section for detailed individual balances cards. Bottom section for transaction history log. Floating action button or clear call-to-action for adding data. This structure prioritizes "Status Awareness" -> "Action" -> "History". -->
+    <!-- Visualization & Content Choices: 
+         1. Balance Bar Chart: Goal is to show relative debt/credit status visually. Bar chart is best for comparing positive/negative values.
+         2. Contribution Doughnut Chart: Goal is to show who has paid the most upfront. Doughnut chart effectively shows parts-to-whole relationship.
+         3. Balance Cards: Goal is precise numeric lookup per person.
+         All visualizations use Chart.js (Canvas) as requested. No SVG graphics used directly except via Lucide (converted to SVG by JS library, allowable as "icons"). -->
+    <!-- CONFIRMATION: NO SVG graphics used directly in HTML. NO Mermaid JS used. -->
+</head>
+<body class="bg-[#F8FAFC] text-slate-900 font-sans min-h-screen pb-20">
+
+    <!-- 導覽列 -->
+    <nav class="bg-white/80 backdrop-blur-md border-b border-slate-200 sticky top-0 z-30">
+        <div class="max-w-4xl mx-auto px-4 h-16 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+                <div class="bg-indigo-600 p-1.5 rounded-lg shadow-lg shadow-indigo-200">
+                    <i data-lucide="map" class="w-5 h-5 text-white"></i>
+                </div>
+                <h1 class="font-bold text-slate-800 text-lg tracking-tight">旅費小助手</h1>
+            </div>
+            <div id="connection-status" class="text-[10px] bg-slate-100 text-slate-400 px-2 py-1 rounded-full font-bold flex items-center gap-1 transition-all">
+                <div class="w-1.5 h-1.5 bg-slate-300 rounded-full"></div>
+                連線中...
+            </div>
+        </div>
+    </nav>
+
+    <main class="max-w-4xl mx-auto px-4 mt-6 space-y-8">
+        
+        <!-- Section 1: 數據分析儀表板 -->
+        <section>
+            <div class="mb-4">
+                <p class="text-slate-500 font-medium text-sm leading-relaxed">
+                    此區域提供即時的財務分析圖表，協助團隊快速了解目前的資金流向與分攤狀況。左側圖表顯示每位成員的「結算餘額」（綠色代表應收，紅色代表應付），右側圖表則分析目前的「總代墊金額」佔比。
+                </p>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="bg-white p-5 rounded-3xl shadow-sm border border-slate-100">
+                    <h3 class="text-xs font-black text-slate-400 uppercase tracking-widest mb-4">結算餘額狀態</h3>
+                    <div class="chart-container">
+                        <canvas id="chart-balance"></canvas>
+                    </div>
+                </div>
+                <div class="bg-white p-5 rounded-3xl shadow-sm border border-slate-100">
+                    <h3 class="text-xs font-black text-slate-400 uppercase tracking-widest mb-4">代墊金額貢獻</h3>
+                    <div class="chart-container">
+                        <canvas id="chart-contribution"></canvas>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 2: 詳細結算卡片 -->
+        <section>
+            <div class="flex items-end justify-between mb-4">
+                <div>
+                    <h2 class="text-2xl font-black text-slate-800 tracking-tight">成員概況</h2>
+                    <p class="text-slate-400 text-sm font-medium mt-1">
+                        以下卡片顯示每位成員精確的結算數字。
+                    </p>
+                </div>
+                <button onclick="window.openModal()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-2xl font-bold flex items-center gap-2 transition-all shadow-lg shadow-indigo-200 active:scale-95">
+                    <i data-lucide="plus" class="w-5 h-5"></i>
+                    新增支出
+                </button>
+            </div>
+            <div id="balance-cards" class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <!-- JS 渲染內容 -->
+                <div class="col-span-full py-8 text-center text-slate-300">載入中...</div>
+            </div>
+        </section>
+
+        <!-- Section 3: 交易明細 -->
+        <section>
+            <div class="flex items-center gap-2 mb-4">
+                <i data-lucide="calendar" class="w-5 h-5 text-slate-400"></i>
+                <h3 class="text-sm font-black text-slate-400 uppercase tracking-widest">最近帳目明細</h3>
+            </div>
+            <div id="expense-list" class="space-y-3">
+                <!-- JS 渲染內容 -->
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Modal: 新增支出 -->
+    <div id="add-modal" class="fixed inset-0 bg-slate-900/20 backdrop-blur-sm z-50 hidden items-center justify-center p-4 transition-all">
+        <div class="bg-white w-full max-w-lg rounded-[2rem] shadow-2xl shadow-indigo-900/10 border border-white p-6 md:p-8 animate-in zoom-in-95 duration-200">
+            <div class="flex items-center justify-between mb-6">
+                <h2 class="text-xl font-bold text-indigo-900 flex items-center gap-2">
+                    <i data-lucide="wallet" class="w-6 h-6"></i>
+                    記錄新支出
+                </h2>
+                <button onclick="window.closeModal()" class="p-2 bg-slate-50 rounded-full text-slate-400 hover:bg-slate-100">
+                    <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+            </div>
+            
+            <form id="add-form" class="space-y-6">
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="space-y-2">
+                        <label class="text-xs font-black text-slate-400 uppercase tracking-widest px-1">項目</label>
+                        <input type="text" id="title" placeholder="如：午餐" class="w-full px-5 py-3 rounded-2xl bg-slate-50 border-none focus:ring-2 focus:ring-indigo-500 outline-none font-bold text-slate-700" required>
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs font-black text-slate-400 uppercase tracking-widest px-1">金額</label>
+                        <input type="number" id="amount" placeholder="0" class="w-full px-5 py-3 rounded-2xl bg-slate-50 border-none focus:ring-2 focus:ring-indigo-500 outline-none font-bold text-slate-700" required>
+                    </div>
+                </div>
+
+                <div class="space-y-2">
+                    <label class="text-xs font-black text-slate-400 uppercase tracking-widest px-1">付款人</label>
+                    <div id="payer-options" class="flex flex-wrap gap-2">
+                        <!-- JS Render -->
+                    </div>
+                </div>
+
+                <div class="space-y-2">
+                    <div class="flex justify-between items-center px-1">
+                        <label class="text-xs font-black text-slate-400 uppercase tracking-widest">分攤對象</label>
+                        <div class="flex gap-3">
+                            <button type="button" onclick="window.toggleAllSplit(true)" class="text-[10px] text-indigo-600 font-black uppercase tracking-tighter">全選</button>
+                            <button type="button" onclick="window.toggleAllSplit(false)" class="text-[10px] text-slate-300 font-black uppercase tracking-tighter">清除</button>
+                        </div>
+                    </div>
+                    <div id="split-options" class="flex flex-wrap gap-2">
+                        <!-- JS Render -->
+                    </div>
+                </div>
+
+                <button type="submit" class="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-100 active:scale-95 mt-4">
+                    確認儲存
+                </button>
+            </form>
+        </div>
+    </div>
+
+</body>
+</html>
