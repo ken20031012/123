@@ -15,13 +15,14 @@
         // --- 全域變數與配置 ---
         // 注意：在 GitHub Pages 或本地運行時，請填入你的 Firebase 配置
         const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
-            apiKey: "請填入你的API_KEY",
-            authDomain: "你的專案ID.firebaseapp.com",
-            projectId: "你的專案ID",
-            storageBucket: "你的專案ID.firebasestorage.app",
-            messagingSenderId: "SENDER_ID",
-            appId: "APP_ID"
-        };
+            apiKey: "AIzaSyAZ-gWWPu0HT-8Ie0P-4aw-KcEkRe573jw",
+  authDomain: "project-8624392815559899005.firebaseapp.com",
+  projectId: "project-8624392815559899005",
+  storageBucket: "project-8624392815559899005.firebasestorage.app",
+  messagingSenderId: "24897659220",
+  appId: "1:24897659220:web:3e179057e47afa6e00a8c1",
+  measurementId: "G-4ZBY7X9G70"
+};
         
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'travel-expense-v1';
         
